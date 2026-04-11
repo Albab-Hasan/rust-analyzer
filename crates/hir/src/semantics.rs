@@ -13,8 +13,8 @@ use std::{
 use base_db::FxIndexSet;
 use either::Either;
 use hir_def::{
-    BuiltinDeriveImplId, DefWithBodyId, ExpressionStoreOwnerId, HasModule, MacroId, StructId,
-    TraitId, VariantId,
+    BuiltinDeriveImplId, DefWithBodyId, ExpressionStoreOwnerId, FunctionId, HasModule, MacroId,
+    StructId, TraitId, VariantId,
     attrs::parse_extra_crate_attrs,
     expr_store::{Body, ExprOrPatSource, ExpressionStore, HygieneId, path::Path},
     hir::{BindingId, Expr, ExprId, ExprOrPatId, Pat},
@@ -416,6 +416,12 @@ impl<DB: HirDatabase + ?Sized> Semantics<'_, DB> {
 
     pub fn to_fn_def(&self, f: &ast::Fn) -> Option<Function> {
         self.imp.to_def(f)
+    }
+
+    /// Returns the `return` expressions in the given function's body,
+    /// excluding those inside closures, async blocks, or const blocks.
+    pub fn fn_return_points(&self, func: Function) -> Vec<InFile<ast::ReturnExpr>> {
+        self.imp.fn_return_points(func)
     }
 
     pub fn to_impl_def(&self, i: &ast::Impl) -> Option<Impl> {
@@ -2245,6 +2251,44 @@ impl<'db> SemanticsImpl<'db> {
             )
         });
         InFile::new(file_id, node)
+    }
+
+    /// Returns the `return` expressions in the given function's body,
+    /// excluding those inside closures, async blocks, or const blocks.
+    pub fn fn_return_points(&self, func: Function) -> Vec<InFile<ast::ReturnExpr>> {
+        let func_id: FunctionId = match func.id {
+            AnyFunctionId::FunctionId(id) => id,
+            _ => return vec![],
+        };
+        let (body, source_map) = Body::with_source_map(self.db, func_id.into());
+
+        fn collect_returns(
+            sema: &SemanticsImpl<'_>,
+            body: &Body,
+            source_map: &hir_def::expr_store::ExpressionStoreSourceMap,
+            expr_id: ExprId,
+            acc: &mut Vec<InFile<ast::ReturnExpr>>,
+        ) {
+            match &body[expr_id] {
+                Expr::Closure { .. } | Expr::Async { .. } | Expr::Const(_) => return,
+                Expr::Return { .. } => {
+                    if let Ok(source) = source_map.expr_syntax(expr_id)
+                        && let Some(ret_expr) = source.value.cast::<ast::ReturnExpr>()
+                    {
+                        let root = sema.parse_or_expand(source.file_id);
+                        acc.push(InFile::new(source.file_id, ret_expr.to_node(&root)));
+                    }
+                }
+                _ => {}
+            }
+            body.walk_child_exprs(expr_id, |child| {
+                collect_returns(sema, body, source_map, child, acc);
+            });
+        }
+
+        let mut returns = vec![];
+        collect_returns(self, body, source_map, body.root_expr(), &mut returns);
+        returns
     }
 
     /// Returns `true` if the `node` is inside an `unsafe` context.
