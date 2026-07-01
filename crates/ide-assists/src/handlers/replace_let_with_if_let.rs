@@ -43,6 +43,17 @@ pub(crate) fn replace_let_with_if_let(
     let init = let_stmt.initializer()?;
     let original_pat = let_stmt.pat()?;
 
+    // make::expr_if formats the condition as raw source text and re-parses it; a lex
+    // error in the initializer (e.g. an unterminated string) puts unbalanced delimiters
+    // in that text, leaving the reconstructed IfExpr without a then_branch and causing
+    // the unconditional unwrap in SyntaxFactory::expr_if to panic.
+    if ctx.file_id().parse_errors(ctx.sema.db).is_some_and(|errors| {
+        let init_range = init.syntax().text_range();
+        errors.iter().any(|e| init_range.contains_range(e.range()))
+    }) {
+        return None;
+    }
+
     let target = let_kw.text_range();
     acc.add(
         AssistId::refactor_rewrite("replace_let_with_if_let"),
@@ -104,7 +115,7 @@ fn let_expr_needs_paren(expr: &ast::Expr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
 
     use super::*;
 
@@ -204,6 +215,18 @@ fn main() {
     }
 }
             ",
+        )
+    }
+
+    #[test]
+    fn replace_let_with_if_let_not_applicable_unterminated_string() {
+        check_assist_not_applicable(
+            replace_let_with_if_let,
+            r#"
+fn f() {
+    $0let s = "foo
+}
+"#,
         )
     }
 
